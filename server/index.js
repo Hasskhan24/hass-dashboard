@@ -293,7 +293,7 @@ app.post('/api/scan/daily', async (req, res) => {
     const startOfDay = new Date(today); startOfDay.setHours(0, 0, 0, 0)
     const endOfDay = new Date(today); endOfDay.setHours(23, 59, 59, 999)
 
-    const [contacts, opportunities, iClosedCalls, iClosedDeals] = await Promise.all([
+    const [contacts, opportunities, iClosedCallsRaw, iClosedDealsRaw] = await Promise.all([
       fetchGHLContacts(100),
       fetchGHLOpportunities(SALES_PIPELINE_ID),
       fetchIClosedCalls({
@@ -308,6 +308,10 @@ app.post('/api/scan/daily', async (req, res) => {
         limit: 100,
       }),
     ])
+
+    // Normalize iClosed responses — API may return object or array
+    const iClosedCalls = Array.isArray(iClosedCallsRaw) ? iClosedCallsRaw : (iClosedCallsRaw?.data || iClosedCallsRaw?.calls || iClosedCallsRaw?.results || [])
+    const iClosedDeals = Array.isArray(iClosedDealsRaw) ? iClosedDealsRaw : (iClosedDealsRaw?.data || iClosedDealsRaw?.deals || iClosedDealsRaw?.results || [])
 
     const appointments = iClosedCalls
 
