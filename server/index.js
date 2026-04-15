@@ -10,11 +10,13 @@ import cron from 'node-cron'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const envPath = path.join(__dirname, '../.env')
-// Always force-load from .env to override any injected env vars
-const envFile = fs.readFileSync(envPath, 'utf8')
-for (const line of envFile.split('\n')) {
-  const [key, ...vals] = line.split('=')
-  if (key && key.trim() && vals.length) process.env[key.trim()] = vals.join('=').trim()
+// Load .env if present (local dev), otherwise rely on injected env vars (Render/production)
+if (fs.existsSync(envPath)) {
+  const envFile = fs.readFileSync(envPath, 'utf8')
+  for (const line of envFile.split('\n')) {
+    const [key, ...vals] = line.split('=')
+    if (key && key.trim() && vals.length) process.env[key.trim()] = vals.join('=').trim()
+  }
 }
 const app = express()
 const PORT = process.env.PORT || 3001
