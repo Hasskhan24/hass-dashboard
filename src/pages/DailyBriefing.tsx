@@ -67,7 +67,7 @@ export default function DailyBriefing() {
   })
 
   return (
-    <div style={{ padding: '32px 40px', maxWidth: 900, margin: '0 auto' }}>
+    <div style={{ padding: '32px 40px' }}>
       {/* Header */}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', marginBottom: 32 }}>
         <div>

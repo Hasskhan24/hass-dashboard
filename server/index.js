@@ -7,6 +7,7 @@ import fs from 'fs'
 import path from 'path'
 import { fileURLToPath } from 'url'
 import cron from 'node-cron'
+import { MARCH_PAYROLL } from './payroll-march.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const envPath = path.join(__dirname, '../.env')
@@ -152,6 +153,191 @@ async function fetchIClosedDeals({ timeFrom, timeTo, limit = 100 } = {}) {
   }
 }
 
+// ─── QuickBooks OAuth 2.0 ────────────────────────────────────────────────────
+const QB_CLIENT_ID = process.env.QB_CLIENT_ID
+const QB_CLIENT_SECRET = process.env.QB_CLIENT_SECRET
+const QB_REDIRECT_URI = `http://localhost:${PORT}/api/qb/callback`
+const QB_AUTH_URL = 'https://appcenter.intuit.com/connect/oauth2'
+const QB_TOKEN_URL = 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer'
+const QB_API_BASE = 'https://quickbooks.api.intuit.com/v3'
+
+// Store tokens in cache
+function getQBTokens() {
+  const cache = readCache()
+  return cache.qbTokens || null
+}
+
+function saveQBTokens(tokens) {
+  const cache = readCache()
+  cache.qbTokens = { ...tokens, savedAt: new Date().toISOString() }
+  writeCache(cache)
+}
+
+async function refreshQBToken() {
+  const tokens = getQBTokens()
+  if (!tokens?.refresh_token) return null
+  try {
+    const res = await axios.post(QB_TOKEN_URL, new URLSearchParams({
+      grant_type: 'refresh_token',
+      refresh_token: tokens.refresh_token,
+    }).toString(), {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: 'Basic ' + Buffer.from(`${QB_CLIENT_ID}:${QB_CLIENT_SECRET}`).toString('base64'),
+      },
+    })
+    const newTokens = { ...res.data, realmId: tokens.realmId }
+    saveQBTokens(newTokens)
+    return newTokens
+  } catch (e) {
+    console.error('QB token refresh error:', e.response?.data || e.message)
+    return null
+  }
+}
+
+async function qbApiCall(endpoint) {
+  let tokens = getQBTokens()
+  if (!tokens?.access_token) return null
+
+  const url = `${QB_API_BASE}/company/${tokens.realmId}${endpoint}`
+  try {
+    const res = await axios.get(url, {
+      headers: {
+        Authorization: `Bearer ${tokens.access_token}`,
+        Accept: 'application/json',
+      },
+    })
+    return res.data
+  } catch (e) {
+    if (e.response?.status === 401) {
+      // Token expired, try refresh
+      tokens = await refreshQBToken()
+      if (!tokens) return null
+      const retry = await axios.get(url, {
+        headers: {
+          Authorization: `Bearer ${tokens.access_token}`,
+          Accept: 'application/json',
+        },
+      })
+      return retry.data
+    }
+    console.error('QB API error:', e.response?.status, e.response?.data || e.message)
+    return null
+  }
+}
+
+async function fetchQBProfitAndLoss(startDate, endDate) {
+  const data = await qbApiCall(`/reports/ProfitAndLoss?start_date=${startDate}&end_date=${endDate}&minorversion=65`)
+  if (!data?.QueryResponse && !data?.Rows && !data?.Header) {
+    // Try alternate response structure
+    return data
+  }
+  return data
+}
+
+async function fetchQBExpenses(startDate, endDate) {
+  const plData = await fetchQBProfitAndLoss(startDate, endDate)
+  if (!plData) return null
+
+  // Parse the QB P&L report into expense categories
+  const expenses = { categories: [], totalExpenses: 0 }
+
+  function parseRows(rows, depth = 0) {
+    if (!rows?.Row) return
+    for (const row of rows.Row) {
+      if (row.type === 'Section' && row.Header) {
+        const sectionName = row.Header.ColData?.[0]?.value || ''
+        if (row.Summary) {
+          const total = parseFloat(row.Summary.ColData?.[1]?.value || '0')
+          if (sectionName && total && !sectionName.includes('Income') && !sectionName.includes('Revenue')) {
+            expenses.categories.push({ name: sectionName, amount: Math.abs(total), items: [] })
+          }
+        }
+        // Parse sub-items
+        if (row.Rows?.Row) {
+          const cat = expenses.categories[expenses.categories.length - 1]
+          for (const subRow of row.Rows.Row) {
+            if (subRow.type === 'Data' && subRow.ColData) {
+              const itemName = subRow.ColData[0]?.value || ''
+              const itemAmount = parseFloat(subRow.ColData[1]?.value || '0')
+              if (itemName && itemAmount && cat) {
+                cat.items.push({ name: itemName, amount: Math.abs(itemAmount) })
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  try {
+    parseRows(plData.Rows || plData)
+    expenses.totalExpenses = expenses.categories.reduce((sum, c) => sum + c.amount, 0)
+  } catch (e) {
+    console.error('QB parse error:', e.message)
+  }
+
+  return expenses
+}
+
+// ─── CF Internal Tools (Production Costs) ───────────────────────────────────
+const CF_TOOLS_API = 'https://script.google.com/macros/s/AKfycby2DsJbHWtk_GFioBcZZmMSO2npyjPpiq5RD8RIbdVSbeIuT0CBChDi_7-7vXSZuecx/exec'
+
+// Per-task rates by content type (matches cfinternaltools rates panel)
+const TASK_RATES = {
+  Video: 20, Ad: 15, Thumbnail: 5, Carousel: 10, Static: 5,
+}
+
+async function fetchProductionCosts() {
+  try {
+    const res = await axios.get(CF_TOOLS_API, { maxRedirects: 5, timeout: 15000 })
+    const tasks = Array.isArray(res.data) ? res.data : (res.data?.data || res.data?.tasks || [])
+
+    const now = new Date()
+    const currentMonth = now.getMonth()
+    const currentYear = now.getFullYear()
+
+    // Group by month and calculate costs
+    const byEditor = {}
+    let totalCost = 0
+    let taskCount = 0
+
+    for (const task of tasks) {
+      // Determine task type and calculate cost
+      const name = (task['Task Name'] || task.name || task.task || '').toString()
+      const editor = task['Assigned'] || task.assigned || task.editor || 'Unassigned'
+      const status = (task['Status'] || task.status || '').toString().toLowerCase()
+
+      // Determine content type from task name patterns
+      let type = 'Video'
+      if (/^T-/i.test(name) || /thumbnail/i.test(name)) type = 'Thumbnail'
+      else if (/^Ad-/i.test(name) || /\bad\b/i.test(name)) type = 'Ad'
+      else if (/carousel/i.test(name)) type = 'Carousel'
+      else if (/static/i.test(name)) type = 'Static'
+
+      const cost = TASK_RATES[type] || 15
+
+      if (!byEditor[editor]) byEditor[editor] = { tasks: 0, cost: 0 }
+      byEditor[editor].tasks += 1
+      byEditor[editor].cost += cost
+      totalCost += cost
+      taskCount += 1
+    }
+
+    return {
+      totalCost,
+      taskCount,
+      byEditor: Object.entries(byEditor)
+        .map(([name, d]) => ({ name, tasks: d.tasks, cost: d.cost }))
+        .sort((a, b) => b.cost - a.cost),
+      month: now.toLocaleString('en-US', { month: 'long', year: 'numeric' }),
+    }
+  } catch (e) {
+    console.error('CF Tools error:', e.message)
+    return null
+  }
+}
+
 // ─── Claude AI ───────────────────────────────────────────────────────────────
 const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY })
 
@@ -267,7 +453,28 @@ function buildFinanceFromAirtable(closerEODs = null, recurringCash = null) {
     byCloser: Object.entries(byCloserMap)
       .map(([name, d]) => ({ name, deals: d.deals, amount: d.amount }))
       .sort((a, b) => b.amount - a.amount),
-    pl: { projectedRevenue: forecastedTotal, fixedCosts: 50000, adSpend: 54000, projectedNet: forecastedTotal - 104000 },
+    pl: {
+      projectedRevenue: forecastedTotal,
+      ownersDraw: 35000,
+      adSpend: 54000,
+      // Fixed monthly overhead from QuickBooks March P&L (stays ~same each month)
+      fixedOverhead: {
+        softwareApps: 12863,
+        rentBuilding: 12000,
+        officeUtilities: 1695,
+        legalAccounting: 2119,
+        bankMerchantFees: 7469,
+        insurance: 750,
+        memberships: 1500,
+        officeExpenses: 655,
+        adminLabor: 859,
+        travel: 1632,
+        meals: 320,
+        interest: 998,
+        vehicle: 28,
+      },
+      marchCOGS: 81454,
+    },
     lastUpdated: eods.length ? `Live from Airtable · ${new Date().toLocaleTimeString('en-US', { timeZone: 'America/Chicago' })}` : 'CF Reporting (MTD Apr)',
   }
 }
@@ -276,6 +483,80 @@ function buildFinanceFromAirtable(closerEODs = null, recurringCash = null) {
 
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }))
+
+// ─── QuickBooks OAuth Routes ────────────────────────────────────────────────
+// Step 1: Start OAuth flow — user visits this URL
+app.get('/api/qb/connect', (req, res) => {
+  const authUrl = `${QB_AUTH_URL}?client_id=${QB_CLIENT_ID}&redirect_uri=${encodeURIComponent(QB_REDIRECT_URI)}&response_type=code&scope=com.intuit.quickbooks.accounting&state=dashboard`
+  res.redirect(authUrl)
+})
+
+// Step 2: OAuth callback — Intuit redirects here with auth code
+app.get('/api/qb/callback', async (req, res) => {
+  const { code, realmId } = req.query
+  if (!code) return res.status(400).send('No authorization code received')
+
+  try {
+    const tokenRes = await axios.post(QB_TOKEN_URL, new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      redirect_uri: QB_REDIRECT_URI,
+    }).toString(), {
+      headers: {
+        'Content-Type': 'application/x-www-form-urlencoded',
+        Authorization: 'Basic ' + Buffer.from(`${QB_CLIENT_ID}:${QB_CLIENT_SECRET}`).toString('base64'),
+      },
+    })
+
+    saveQBTokens({ ...tokenRes.data, realmId })
+    console.log('QuickBooks connected! RealmId:', realmId)
+    res.redirect('/finance?qb=connected')
+  } catch (e) {
+    console.error('QB OAuth error:', e.response?.data || e.message)
+    res.status(500).send('QuickBooks connection failed: ' + (e.response?.data?.error || e.message))
+  }
+})
+
+// Step 3: Check connection status
+app.get('/api/qb/status', (req, res) => {
+  const tokens = getQBTokens()
+  res.json({
+    connected: !!tokens?.access_token,
+    realmId: tokens?.realmId || null,
+    connectedAt: tokens?.savedAt || null,
+  })
+})
+
+// Step 4: Pull expenses from QuickBooks
+app.get('/api/qb/expenses', async (req, res) => {
+  const tokens = getQBTokens()
+  if (!tokens?.access_token) {
+    return res.json({ connected: false, error: 'Not connected. Visit /api/qb/connect to authorize.' })
+  }
+
+  const now = new Date()
+  const startDate = req.query.start || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-01`
+  const endDate = req.query.end || `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+
+  const cache = readCache()
+  // Return cached if less than 1 hour old and same date range
+  if (cache.qbExpenses?.startDate === startDate && cache.qbExpenses?.endDate === endDate &&
+      cache.qbExpensesUpdated && (Date.now() - new Date(cache.qbExpensesUpdated).getTime()) < 3600000) {
+    return res.json(cache.qbExpenses)
+  }
+
+  const expenses = await fetchQBExpenses(startDate, endDate)
+  if (expenses) {
+    const result = { ...expenses, startDate, endDate, connected: true, lastUpdated: new Date().toLocaleTimeString('en-US', { timeZone: 'America/Chicago' }) }
+    const c = readCache()
+    c.qbExpenses = result
+    c.qbExpensesUpdated = new Date().toISOString()
+    writeCache(c)
+    return res.json(result)
+  }
+
+  res.json(cache.qbExpenses || { connected: true, categories: [], totalExpenses: 0, error: 'Failed to fetch' })
+})
 
 // Scan status
 app.get('/api/scan/status', (req, res) => {
@@ -293,7 +574,7 @@ app.post('/api/scan/daily', async (req, res) => {
     const startOfDay = new Date(today); startOfDay.setHours(0, 0, 0, 0)
     const endOfDay = new Date(today); endOfDay.setHours(23, 59, 59, 999)
 
-    const [contacts, opportunities, iClosedCallsRaw, iClosedDealsRaw] = await Promise.all([
+    const [contacts, opportunities, iClosedCallsRaw, iClosedDealsRaw, productionCosts] = await Promise.all([
       fetchGHLContacts(100),
       fetchGHLOpportunities(SALES_PIPELINE_ID),
       fetchIClosedCalls({
@@ -307,6 +588,7 @@ app.post('/api/scan/daily', async (req, res) => {
         timeTo: endOfDay.toISOString(),
         limit: 100,
       }),
+      fetchProductionCosts(),
     ])
 
     // Normalize iClosed responses — API may return object or array
@@ -441,6 +723,7 @@ BUSINESS CONTEXT:
     cache.briefing = briefing
     cache.sales = salesData
     cache.scanStatus = scanStatus
+    if (productionCosts) cache.productionCosts = productionCosts
     cache.lastScan = new Date().toISOString()
     writeCache(cache)
 
@@ -450,6 +733,23 @@ BUSINESS CONTEXT:
     console.error('Scan error:', err)
     res.status(500).json({ error: err.message })
   }
+})
+
+// Production costs from CF Internal Tools
+app.get('/api/production-costs', async (req, res) => {
+  const cache = readCache()
+  // Return cached if less than 1 hour old
+  if (cache.productionCosts && cache.productionCostsUpdated && (Date.now() - new Date(cache.productionCostsUpdated).getTime()) < 3600000) {
+    return res.json(cache.productionCosts)
+  }
+  const costs = await fetchProductionCosts()
+  if (costs) {
+    const c = readCache()
+    c.productionCosts = costs
+    c.productionCostsUpdated = new Date().toISOString()
+    writeCache(c)
+  }
+  res.json(costs || cache.productionCosts || { totalCost: 0, taskCount: 0, byEditor: [] })
 })
 
 // Get briefing
@@ -497,6 +797,11 @@ Be concise, direct, and action-oriented. Use numbers and specifics when availabl
     console.error('Chat error:', err)
     res.status(500).json({ error: err.message })
   }
+})
+
+// Payroll data — from March 2026 payroll PDF (source of truth)
+app.get('/api/payroll', (req, res) => {
+  res.json(MARCH_PAYROLL)
 })
 
 // Finance data

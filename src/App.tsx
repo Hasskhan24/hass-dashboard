@@ -11,7 +11,7 @@ import ClientHealth from './pages/ClientHealth'
 function App() {
   return (
     <BrowserRouter>
-      <div style={{ display: 'flex', height: '100vh', background: '#0a0a0a' }}>
+      <div style={{ display: 'flex', height: '100vh', width: '100%', background: '#0a0a0a' }}>
         <Sidebar />
         <main style={{ flex: 1, overflowY: 'auto' }}>
           <Routes>

@@ -30,7 +30,7 @@ export default function Production() {
   const filtered = data?.tickets?.filter(t => filter === 'all' || t.status === filter) || []
 
   return (
-    <div style={{ padding: '32px 40px', maxWidth: 1000, margin: '0 auto' }}>
+    <div style={{ padding: '32px 40px' }}>
       <div style={{ marginBottom: 32 }}>
         <h1 style={{ fontSize: 24, fontWeight: 700, color: '#e8e8e8', marginBottom: 4 }}>Production</h1>
         <p style={{ fontSize: 13, color: '#555' }}>Shoots & Upload Tickets</p>

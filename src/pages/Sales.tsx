@@ -50,7 +50,7 @@ export default function Sales() {
   }, [])
 
   return (
-    <div style={{ padding: '32px 40px', maxWidth: 1000, margin: '0 auto' }}>
+    <div style={{ padding: '32px 40px' }}>
       <div style={{ marginBottom: 32 }}>
         <h1 style={{ fontSize: 24, fontWeight: 700, color: '#e8e8e8', marginBottom: 4 }}>Sales</h1>
         <p style={{ fontSize: 13, color: '#555' }}>Calls & Pipeline</p>

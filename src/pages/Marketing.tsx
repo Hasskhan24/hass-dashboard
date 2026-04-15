@@ -32,7 +32,7 @@ export default function Marketing() {
   const fmt = (n: number) => n >= 1000 ? `$${(n / 1000).toFixed(1)}k` : `$${n?.toFixed(0) || 0}`
 
   return (
-    <div style={{ padding: '32px 40px', maxWidth: 1000, margin: '0 auto' }}>
+    <div style={{ padding: '32px 40px' }}>
       <div style={{ marginBottom: 32 }}>
         <h1 style={{ fontSize: 24, fontWeight: 700, color: '#e8e8e8', marginBottom: 4 }}>Marketing</h1>
         <p style={{ fontSize: 13, color: '#555' }}>Ads & Email</p>

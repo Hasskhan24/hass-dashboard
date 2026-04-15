@@ -42,7 +42,7 @@ export default function ClientHealth() {
   const fmt = (n: number) => `$${n?.toLocaleString() || 0}`
 
   return (
-    <div style={{ padding: '32px 40px', maxWidth: 1000, margin: '0 auto' }}>
+    <div style={{ padding: '32px 40px' }}>
       <div style={{ marginBottom: 32 }}>
         <h1 style={{ fontSize: 24, fontWeight: 700, color: '#e8e8e8', marginBottom: 4 }}>Client Health</h1>
         <p style={{ fontSize: 13, color: '#555' }}>Retention & At-Risk Tracker</p>
