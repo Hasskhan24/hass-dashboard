@@ -113,6 +113,122 @@ async function fetchGHLOpportunities(pipelineId) {
   }
 }
 
+// ─── Hyros API ───────────────────────────────────────────────────────────────
+const HYROS_BASE = 'https://api.hyros.com/v1/api/v1.0'
+
+function hyrosHeaders() {
+  return { 'API-Key': process.env.HYROS_API_KEY }
+}
+
+async function fetchHyrosLeads({ limit = 50, page = 1 } = {}) {
+  try {
+    const res = await axios.get(`${HYROS_BASE}/leads`, {
+      headers: hyrosHeaders(),
+      params: { limit, page },
+    })
+    return res.data?.result || []
+  } catch (e) {
+    console.error('Hyros leads error:', e.response?.status, e.message)
+    return []
+  }
+}
+
+async function fetchHyrosSales({ limit = 50, page = 1 } = {}) {
+  try {
+    const res = await axios.get(`${HYROS_BASE}/sales`, {
+      headers: hyrosHeaders(),
+      params: { limit, page },
+    })
+    return res.data?.result || []
+  } catch (e) {
+    console.error('Hyros sales error:', e.response?.status, e.message)
+    return []
+  }
+}
+
+async function fetchHyrosMarketingData() {
+  // Get current month's date range
+  const now = new Date()
+  const monthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+  const monthPrefix = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`
+
+  // Paginate leads to get all for current month
+  const allLeads = []
+  for (let page = 1; page <= 25; page++) {
+    const leads = await fetchHyrosLeads({ limit: 50, page })
+    if (!leads.length) break
+    const monthLeads = leads.filter(l => (l.creationDate || '').startsWith(monthPrefix))
+    allLeads.push(...monthLeads)
+    // If fewer month leads than total, we've gone past the month
+    if (monthLeads.length < leads.length && page > 1) break
+  }
+
+  // Get sales
+  const sales = await fetchHyrosSales({ limit: 50 })
+  const monthSales = sales.filter(s => {
+    const date = s.creationDate || ''
+    return date.includes('2026') && date.includes(now.toLocaleString('en-US', { month: 'short' }))
+  })
+
+  // Aggregate by source
+  const bySource = {}
+  const byCampaign = {}
+  for (const lead of allLeads) {
+    const fs = lead.firstSource || {}
+    const src = fs.trafficSource?.name || 'unknown'
+    const campaign = fs.category?.name || 'uncategorized'
+    bySource[src] = (bySource[src] || 0) + 1
+    byCampaign[campaign] = (byCampaign[campaign] || 0) + 1
+  }
+
+  const totalRevenue = monthSales.reduce((sum, s) => sum + (s.usdPrice?.price || 0), 0)
+  const totalLeads = allLeads.length
+  const facebookLeads = bySource.facebook || 0
+  const organicLeads = totalLeads - facebookLeads - (bySource.unknown || 0)
+
+  // Estimate spend from $1,800/day baseline until Facebook Ads API is wired up
+  const daysSoFar = Math.ceil((Date.now() - monthStart.getTime()) / (1000 * 60 * 60 * 24))
+  const estimatedSpend = daysSoFar * 1800
+  const cpl = facebookLeads > 0 ? estimatedSpend / facebookLeads : 0
+  const roas = estimatedSpend > 0 ? totalRevenue / estimatedSpend : 0
+
+  return {
+    period: now.toLocaleString('en-US', { month: 'long', year: 'numeric' }),
+    leads: {
+      total: totalLeads,
+      facebook: facebookLeads,
+      organic: organicLeads,
+      unknown: bySource.unknown || 0,
+      bySource,
+    },
+    topCampaigns: Object.entries(byCampaign)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 10)
+      .map(([name, count]) => ({ name, leads: count })),
+    sales: {
+      count: monthSales.length,
+      revenue: totalRevenue,
+      deals: monthSales.map(s => ({
+        name: `${s.lead?.firstName || ''} ${s.lead?.lastName || ''}`.trim() || s.lead?.email || 'Unknown',
+        amount: s.usdPrice?.price || 0,
+        date: s.creationDate,
+      })).sort((a, b) => b.amount - a.amount),
+    },
+    spend: {
+      estimated: estimatedSpend,
+      dailyRate: 1800,
+      daysSoFar,
+      source: 'baseline estimate (Hyros API does not expose spend)',
+    },
+    metrics: {
+      cpl: parseFloat(cpl.toFixed(0)),
+      roas: parseFloat(roas.toFixed(2)),
+      conversionRate: totalLeads > 0 ? parseFloat((monthSales.length / totalLeads * 100).toFixed(2)) : 0,
+    },
+    lastUpdated: new Date().toLocaleTimeString('en-US', { timeZone: 'America/Chicago' }),
+  }
+}
+
 // ─── iClosed API ─────────────────────────────────────────────────────────────
 const ICLOSED_BASE = 'https://public.api.iclosed.io/v1'
 
@@ -821,7 +937,7 @@ app.post('/api/finance/refresh', async (req, res) => {
     const today = new Date()
     const monthStart = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-01`
 
-    const [closerEODs, recurringCash] = await Promise.all([
+    const [closerEODs, recurringCash, newCashRecords] = await Promise.all([
       fetchAirtableRecords('tblrF6wHdRLHXQ4EN',
         ['Your Name','Calls Taken','No Shows','Offers Made','Deals Closed','Cash Collected','Revenue Generated','Call Slots Filled'],
         `IS_AFTER({Today's Date}, '${monthStart}')`
@@ -830,12 +946,46 @@ app.post('/api/finance/refresh', async (req, res) => {
         ['Client','Client Status','April 26','April Act 26'],
         `{Client Status}='Active - MRR'`
       ),
+      fetchAirtableRecords('tblQDgLyWasv8T7Qz',
+        ['Client / Deal Name','Cash Collected','Rev Generated','Closer Name','Date Closed','Service','Sale Type'],
+        `IS_AFTER({Date Closed}, '${monthStart}')`
+      ),
     ])
 
     const finance = buildFinanceFromAirtable(
       closerEODs.length ? closerEODs : null,
       recurringCash.length ? recurringCash : null
     )
+
+    // Override new cash with data from NEW Cash table (source of truth)
+    if (newCashRecords.length) {
+      let cashCollected = 0, revGenerated = 0
+      const byCloserMap = {}
+      for (const r of newCashRecords) {
+        const f = r.fields || r.cellValuesByFieldId || {}
+        const cash = Number(f['Cash Collected'] || f['fldwBOUnG9olgOJe2'] || 0)
+        const rev = Number(f['Rev Generated'] || f['fld1KJdXQYr2Bm0pp'] || 0)
+        const closerRaw = f['Closer Name'] || f['fldiXMFl9agUUDFtc']
+        const closer = Array.isArray(closerRaw) ? (closerRaw[0]?.name || closerRaw[0] || '').toString() : (closerRaw?.name || closerRaw || '').toString()
+        cashCollected += cash
+        revGenerated += rev
+        if (closer) {
+          if (!byCloserMap[closer]) byCloserMap[closer] = { deals: 0, amount: 0 }
+          byCloserMap[closer].deals += 1
+          byCloserMap[closer].amount += cash
+        }
+      }
+      finance.newCash.collected = cashCollected
+      finance.newCash.revenue = revGenerated
+      finance.newCash.deals = newCashRecords.length
+      finance.newCash.totalCollected = finance.mrr.collected + cashCollected
+      finance.newCash.forecastedTotal = finance.mrr.expected + cashCollected
+      finance.pl.projectedRevenue = finance.newCash.forecastedTotal
+      finance.byCloser = Object.entries(byCloserMap)
+        .map(([name, d]) => ({ name, deals: d.deals, amount: d.amount }))
+        .sort((a, b) => b.amount - a.amount)
+      finance.lastUpdated = `Live from Airtable NEW Cash · ${new Date().toLocaleTimeString('en-US', { timeZone: 'America/Chicago' })}`
+    }
 
     const cache = readCache()
     cache.finance = finance
@@ -854,15 +1004,33 @@ app.get('/api/sales', (req, res) => {
   res.json(cache.sales || null)
 })
 
-// Marketing data
-app.get('/api/marketing', (req, res) => {
+// Marketing data — live from Hyros
+app.get('/api/marketing', async (req, res) => {
   const cache = readCache()
-  res.json(cache.marketing || {
-    email: { scanned: 0, timeSensitive: 0, needsResponse: 0, fyi: 0 },
-    ads: { spend: 0, impressions: 0, clicks: 0, leads: 0, cpl: 0, roas: 0 },
-    broadcastStatus: 'No data — run a scan',
-    lastUpdated: 'Never',
-  })
+  // Return cached if less than 1 hour old
+  if (cache.marketing && cache.marketingUpdated && (Date.now() - new Date(cache.marketingUpdated).getTime()) < 3600000) {
+    return res.json(cache.marketing)
+  }
+
+  try {
+    const marketing = await fetchHyrosMarketingData()
+    const c = readCache()
+    c.marketing = marketing
+    c.marketingUpdated = new Date().toISOString()
+    writeCache(c)
+    res.json(marketing)
+  } catch (err) {
+    console.error('Marketing error:', err.message)
+    res.json(cache.marketing || {
+      period: 'No data',
+      leads: { total: 0, facebook: 0, organic: 0, bySource: {} },
+      topCampaigns: [],
+      sales: { count: 0, revenue: 0, deals: [] },
+      spend: { estimated: 0, dailyRate: 1800, daysSoFar: 0 },
+      metrics: { cpl: 0, roas: 0, conversionRate: 0 },
+      lastUpdated: 'Error loading',
+    })
+  }
 })
 
 // Production data
