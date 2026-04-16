@@ -1,5 +1,18 @@
 import { useState, useEffect } from 'react'
 
+interface Campaign {
+  name: string
+  leads: number
+  calls: number
+  sales: number
+  revenue: number
+  estimatedSpend: number
+  costPerCall: number
+  roas: number
+  source: string
+  topAds: string[]
+}
+
 interface MarketingData {
   period: string
   leads: {
@@ -9,11 +22,17 @@ interface MarketingData {
     unknown: number
     bySource: Record<string, number>
   }
-  topCampaigns: { name: string; leads: number }[]
+  topCampaigns: Campaign[]
   sales: {
     count: number
     revenue: number
     deals: { name: string; amount: number; date: string }[]
+  }
+  calls: {
+    booked: number
+    qualified: number
+    cancelled: number
+    costPerCall: number
   }
   spend: {
     estimated: number
@@ -23,6 +42,7 @@ interface MarketingData {
   }
   metrics: {
     cpl: number
+    cpc: number
     roas: number
     conversionRate: number
   }
@@ -119,7 +139,7 @@ export default function Marketing() {
       {/* Top KPIs */}
       <div style={{ marginBottom: 36 }}>
         <SectionLabel label="Performance Overview" color="#7c3aed" />
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12 }}>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 12 }}>
           <MetricCard
             value={fmt(data.spend.estimated)}
             label="Ad Spend (MTD)"
@@ -137,6 +157,13 @@ export default function Marketing() {
             sub={`Spend / FB Leads`}
             warn={data.metrics.cpl > 100}
             highlight={data.metrics.cpl > 0 && data.metrics.cpl < 50}
+          />
+          <MetricCard
+            value={fmt(data.metrics.cpc || data.calls?.costPerCall || 0)}
+            label="Cost Per Call"
+            sub={`${fmtNum(data.calls?.qualified || 0)} qualified · ${fmtNum(data.calls?.cancelled || 0)} cancelled`}
+            warn={(data.metrics.cpc || 0) > 100}
+            highlight={(data.metrics.cpc || 0) > 0 && (data.metrics.cpc || 0) < 50}
           />
           <MetricCard
             value={`${data.metrics.roas.toFixed(2)}x`}
@@ -243,29 +270,70 @@ export default function Marketing() {
         </div>
       </div>
 
-      {/* Top Campaigns */}
+      {/* Top Campaigns with ROAS */}
       {data.topCampaigns.length > 0 && (
         <div style={{ marginBottom: 36 }}>
-          <SectionLabel label="Top Ad Campaigns" color="#f59e0b" />
+          <SectionLabel label="Top Ad Campaigns by Revenue" color="#f59e0b" />
           <div style={{ background: '#111', border: '1px solid #1e1e1e', borderRadius: 12, overflow: 'hidden' }}>
-            {data.topCampaigns.map((c, i) => {
-              const pct = totalLeads > 0 ? (c.leads / totalLeads) * 100 : 0
-              return (
-                <div key={i} style={{
-                  display: 'flex', justifyContent: 'space-between', alignItems: 'center',
-                  padding: '14px 20px',
-                  borderBottom: i < data.topCampaigns.length - 1 ? '1px solid #141414' : 'none',
+            {/* Header row */}
+            <div style={{
+              display: 'grid',
+              gridTemplateColumns: '2.2fr 0.8fr 0.8fr 0.8fr 1fr 1fr 0.7fr',
+              gap: 12,
+              padding: '12px 20px',
+              borderBottom: '1px solid #1a1a1a',
+              fontSize: 10, fontWeight: 700, color: '#555', letterSpacing: '0.08em', textTransform: 'uppercase',
+            }}>
+              <div>Campaign</div>
+              <div style={{ textAlign: 'right' }}>Leads</div>
+              <div style={{ textAlign: 'right' }}>Calls</div>
+              <div style={{ textAlign: 'right' }}>Sales</div>
+              <div style={{ textAlign: 'right' }}>Spend (est)</div>
+              <div style={{ textAlign: 'right' }}>Revenue</div>
+              <div style={{ textAlign: 'right' }}>ROAS</div>
+            </div>
+            {data.topCampaigns.map((c, i) => (
+              <div key={i} style={{
+                padding: '14px 20px',
+                borderBottom: i < data.topCampaigns.length - 1 ? '1px solid #141414' : 'none',
+              }}>
+                <div style={{
+                  display: 'grid',
+                  gridTemplateColumns: '2.2fr 0.8fr 0.8fr 0.8fr 1fr 1fr 0.7fr',
+                  gap: 12,
+                  alignItems: 'center',
                 }}>
-                  <div style={{ flex: 1, minWidth: 0, marginRight: 16 }}>
+                  <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 13, color: '#e8e8e8', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{c.name}</div>
-                    <div style={{ width: '100%', height: 3, background: '#1a1a1a', borderRadius: 2, marginTop: 6, overflow: 'hidden' }}>
-                      <div style={{ height: 3, width: `${pct}%`, background: '#f59e0b', borderRadius: 2 }} />
+                    <div style={{ fontSize: 10, color: '#555', marginTop: 2, textTransform: 'capitalize' }}>
+                      {c.source}{c.costPerCall > 0 ? ` · $${fmtNum(c.costPerCall)}/call` : ''}
                     </div>
                   </div>
-                  <span style={{ fontSize: 14, fontWeight: 700, color: '#f59e0b', flexShrink: 0 }}>{c.leads}</span>
+                  <div style={{ fontSize: 13, color: '#ccc', textAlign: 'right' }}>{fmtNum(c.leads)}</div>
+                  <div style={{ fontSize: 13, color: (c.calls || 0) > 0 ? '#3b82f6' : '#555', textAlign: 'right', fontWeight: (c.calls || 0) > 0 ? 600 : 400 }}>{fmtNum(c.calls || 0)}</div>
+                  <div style={{ fontSize: 13, color: c.sales > 0 ? '#10b981' : '#555', textAlign: 'right', fontWeight: c.sales > 0 ? 600 : 400 }}>{c.sales}</div>
+                  <div style={{ fontSize: 13, color: '#999', textAlign: 'right' }}>{fmt(c.estimatedSpend)}</div>
+                  <div style={{ fontSize: 13, color: c.revenue > 0 ? '#10b981' : '#555', textAlign: 'right', fontWeight: c.revenue > 0 ? 600 : 400 }}>{fmt(c.revenue)}</div>
+                  <div style={{
+                    fontSize: 13, fontWeight: 700, textAlign: 'right',
+                    color: c.roas >= 2 ? '#10b981' : c.roas >= 1 ? '#f59e0b' : c.roas > 0 ? '#ef4444' : '#333',
+                  }}>
+                    {c.roas > 0 ? `${c.roas.toFixed(2)}x` : '—'}
+                  </div>
                 </div>
-              )
-            })}
+                {c.topAds && c.topAds.length > 0 && (
+                  <div style={{ marginTop: 10, paddingTop: 10, borderTop: '1px solid #1a1a1a' }}>
+                    <div style={{ fontSize: 10, color: '#444', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 6 }}>Top Ads in Campaign</div>
+                    {c.topAds.map((ad, j) => (
+                      <div key={j} style={{ fontSize: 11, color: '#888', padding: '2px 0' }}>• {ad}</div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: '#333', marginTop: 8, textAlign: 'right' }}>
+            Spend estimated proportionally by lead share. ROAS = Revenue / Est. Spend.
           </div>
         </div>
       )}

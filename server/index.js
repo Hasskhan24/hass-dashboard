@@ -146,6 +146,19 @@ async function fetchHyrosSales({ limit = 50, page = 1 } = {}) {
   }
 }
 
+async function fetchHyrosCalls({ limit = 50, page = 1 } = {}) {
+  try {
+    const res = await axios.get(`${HYROS_BASE}/calls`, {
+      headers: hyrosHeaders(),
+      params: { limit, page },
+    })
+    return res.data?.result || []
+  } catch (e) {
+    console.error('Hyros calls error:', e.response?.status, e.message)
+    return []
+  }
+}
+
 async function fetchHyrosMarketingData() {
   // Get current month's date range
   const now = new Date()
@@ -165,20 +178,40 @@ async function fetchHyrosMarketingData() {
 
   // Get sales
   const sales = await fetchHyrosSales({ limit: 50 })
+  const monthName = now.toLocaleString('en-US', { month: 'short' })
   const monthSales = sales.filter(s => {
     const date = s.creationDate || ''
-    return date.includes('2026') && date.includes(now.toLocaleString('en-US', { month: 'short' }))
+    return date.includes('2026') && date.includes(monthName)
   })
 
   // Aggregate by source
   const bySource = {}
-  const byCampaign = {}
+  const byCampaign = {} // { campaign: { leads, sourceName, firstLead } }
   for (const lead of allLeads) {
     const fs = lead.firstSource || {}
     const src = fs.trafficSource?.name || 'unknown'
     const campaign = fs.category?.name || 'uncategorized'
+    const sourceLinkName = fs.name || ''
     bySource[src] = (bySource[src] || 0) + 1
-    byCampaign[campaign] = (byCampaign[campaign] || 0) + 1
+    if (!byCampaign[campaign]) {
+      byCampaign[campaign] = { leads: 0, sales: 0, revenue: 0, sourceLinks: new Set(), source: src }
+    }
+    byCampaign[campaign].leads += 1
+    if (sourceLinkName) byCampaign[campaign].sourceLinks.add(sourceLinkName)
+  }
+
+  // Attribute sales to campaigns via lead's firstSource
+  for (const sale of monthSales) {
+    const lead = sale.lead
+    if (!lead) continue
+    // Sales API doesn't have full source info, so look up the lead from leads list
+    const fullLead = allLeads.find(l => l.email === lead.email || l.id === lead.id)
+    const campaign = fullLead?.firstSource?.category?.name || 'uncategorized'
+    if (!byCampaign[campaign]) {
+      byCampaign[campaign] = { leads: 0, sales: 0, revenue: 0, sourceLinks: new Set(), source: 'unknown' }
+    }
+    byCampaign[campaign].sales += 1
+    byCampaign[campaign].revenue += sale.usdPrice?.price || 0
   }
 
   const totalRevenue = monthSales.reduce((sum, s) => sum + (s.usdPrice?.price || 0), 0)
@@ -186,11 +219,62 @@ async function fetchHyrosMarketingData() {
   const facebookLeads = bySource.facebook || 0
   const organicLeads = totalLeads - facebookLeads - (bySource.unknown || 0)
 
+  // Pull calls MTD from Hyros (paginated)
+  const allCalls = []
+  for (let page = 1; page <= 25; page++) {
+    const calls = await fetchHyrosCalls({ limit: 50, page })
+    if (!calls.length) break
+    const monthCalls = calls.filter(c => {
+      const date = c.creationDate || ''
+      return date.includes('2026') && date.includes(monthName)
+    })
+    allCalls.push(...monthCalls)
+    if (monthCalls.length < calls.length && page > 1) break
+  }
+  const qualifiedCalls = allCalls.filter(c => c.state === 'QUALIFIED').length
+  const cancelledCalls = allCalls.filter(c => c.state === 'CANCELLED').length
+  const callsBooked = allCalls.length
+
+  // Attribute calls to campaigns
+  for (const call of allCalls) {
+    const campaign = call.firstSource?.category?.name || 'uncategorized'
+    if (byCampaign[campaign]) {
+      byCampaign[campaign].calls = (byCampaign[campaign].calls || 0) + 1
+    }
+  }
+
   // Estimate spend from $1,800/day baseline until Facebook Ads API is wired up
   const daysSoFar = Math.ceil((Date.now() - monthStart.getTime()) / (1000 * 60 * 60 * 24))
   const estimatedSpend = daysSoFar * 1800
   const cpl = facebookLeads > 0 ? estimatedSpend / facebookLeads : 0
+  // Cost per call uses qualified calls (excludes cancellations) as the real metric
+  const cpc = qualifiedCalls > 0 ? estimatedSpend / qualifiedCalls : 0
   const roas = estimatedSpend > 0 ? totalRevenue / estimatedSpend : 0
+
+  // Build top campaigns with revenue + ROAS
+  // Distribute estimated spend proportionally based on lead share
+  const topCampaigns = Object.entries(byCampaign)
+    .map(([name, d]) => {
+      const leadShare = totalLeads > 0 ? d.leads / totalLeads : 0
+      const estimatedCampaignSpend = estimatedSpend * leadShare
+      const campaignRoas = estimatedCampaignSpend > 0 ? d.revenue / estimatedCampaignSpend : 0
+      const campaignCalls = d.calls || 0
+      const costPerCampaignCall = campaignCalls > 0 ? estimatedCampaignSpend / campaignCalls : 0
+      return {
+        name,
+        leads: d.leads,
+        calls: campaignCalls,
+        sales: d.sales,
+        revenue: d.revenue,
+        estimatedSpend: Math.round(estimatedCampaignSpend),
+        costPerCall: parseFloat(costPerCampaignCall.toFixed(0)),
+        roas: parseFloat(campaignRoas.toFixed(2)),
+        source: d.source,
+        topAds: Array.from(d.sourceLinks).slice(0, 3),
+      }
+    })
+    .sort((a, b) => b.revenue - a.revenue || b.leads - a.leads)
+    .slice(0, 10)
 
   return {
     period: now.toLocaleString('en-US', { month: 'long', year: 'numeric' }),
@@ -201,10 +285,7 @@ async function fetchHyrosMarketingData() {
       unknown: bySource.unknown || 0,
       bySource,
     },
-    topCampaigns: Object.entries(byCampaign)
-      .sort((a, b) => b[1] - a[1])
-      .slice(0, 10)
-      .map(([name, count]) => ({ name, leads: count })),
+    topCampaigns,
     sales: {
       count: monthSales.length,
       revenue: totalRevenue,
@@ -214,6 +295,12 @@ async function fetchHyrosMarketingData() {
         date: s.creationDate,
       })).sort((a, b) => b.amount - a.amount),
     },
+    calls: {
+      booked: callsBooked,
+      qualified: qualifiedCalls,
+      cancelled: cancelledCalls,
+      costPerCall: parseFloat(cpc.toFixed(0)),
+    },
     spend: {
       estimated: estimatedSpend,
       dailyRate: 1800,
@@ -222,6 +309,7 @@ async function fetchHyrosMarketingData() {
     },
     metrics: {
       cpl: parseFloat(cpl.toFixed(0)),
+      cpc: parseFloat(cpc.toFixed(0)),
       roas: parseFloat(roas.toFixed(2)),
       conversionRate: totalLeads > 0 ? parseFloat((monthSales.length / totalLeads * 100).toFixed(2)) : 0,
     },
