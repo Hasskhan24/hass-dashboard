@@ -1023,12 +1023,16 @@ app.post('/api/finance/refresh', async (req, res) => {
   try {
     // Pull live from Airtable if API key is set
     const today = new Date()
-    const monthStart = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-01`
+    // Use day BEFORE month start so IS_AFTER includes the 1st of the month
+    const dayBeforeMonthStart = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-01`
+    const prevDay = new Date(dayBeforeMonthStart)
+    prevDay.setDate(prevDay.getDate() - 1)
+    const filterDate = `${prevDay.getFullYear()}-${String(prevDay.getMonth()+1).padStart(2,'0')}-${String(prevDay.getDate()).padStart(2,'0')}`
 
     const [closerEODs, recurringCash, newCashRecords] = await Promise.all([
       fetchAirtableRecords('tblrF6wHdRLHXQ4EN',
         ['Your Name','Calls Taken','No Shows','Offers Made','Deals Closed','Cash Collected','Revenue Generated','Call Slots Filled'],
-        `IS_AFTER({Today's Date}, '${monthStart}')`
+        `IS_AFTER({Today's Date}, '${filterDate}')`
       ),
       fetchAirtableRecords('tblIIV3rVGhhV0vsf',
         ['Client','Client Status','April 26','April Act 26'],
@@ -1036,7 +1040,7 @@ app.post('/api/finance/refresh', async (req, res) => {
       ),
       fetchAirtableRecords('tblQDgLyWasv8T7Qz',
         ['Client / Deal Name','Cash Collected','Rev Generated','Closer Name','Date Closed','Service','Sale Type'],
-        `IS_AFTER({Date Closed}, '${monthStart}')`
+        `IS_AFTER({Date Closed}, '${filterDate}')`
       ),
     ])
 
