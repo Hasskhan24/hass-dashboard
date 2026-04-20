@@ -1090,10 +1090,178 @@ app.post('/api/finance/refresh', async (req, res) => {
   }
 })
 
-// Sales data
-app.get('/api/sales', (req, res) => {
+// Sales data - comprehensive dashboard
+app.get('/api/sales', async (req, res) => {
   const cache = readCache()
-  res.json(cache.sales || null)
+  // Return cached if < 30 min old
+  if (cache.salesDashboard && cache.salesDashboardUpdated &&
+      (Date.now() - new Date(cache.salesDashboardUpdated).getTime()) < 1800000) {
+    return res.json(cache.salesDashboard)
+  }
+
+  try {
+    const today = new Date()
+    const yesterday = new Date(today)
+    yesterday.setDate(yesterday.getDate() - 1)
+    const todayStr = today.toISOString().slice(0, 10)
+    const yesterdayStr = yesterday.toISOString().slice(0, 10)
+    const monthStart = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-01`
+    const prevDay = new Date(monthStart)
+    prevDay.setDate(prevDay.getDate() - 1)
+    const filterDate = prevDay.toISOString().slice(0, 10)
+
+    // Pull everything in parallel
+    const [closerEODs, newCashRecords, ghlOpps] = await Promise.all([
+      fetchAirtableRecords('tblrF6wHdRLHXQ4EN',
+        ['Your Name', "Today's Date", 'Call Slots Filled', 'Calls Taken', 'No Shows', 'Offers Made', 'Deals Closed', 'Cash Collected', 'Revenue Generated'],
+        `IS_AFTER({Today's Date}, '${filterDate}')`
+      ),
+      fetchAirtableRecords('tblQDgLyWasv8T7Qz',
+        ['Client / Deal Name', 'Cash Collected', 'Rev Generated', 'Closer Name', 'Date Closed', 'Service', 'Sale Type'],
+        `IS_AFTER({Date Closed}, '${filterDate}')`
+      ),
+      fetchGHLOpportunities(SALES_PIPELINE_ID),
+    ])
+
+    // ── Calls: today, yesterday, MTD by closer ──
+    const byCloser = {}
+    const closerNames = ['Akash', 'Lily', 'Eric', 'Hass']
+    for (const name of closerNames) {
+      byCloser[name] = {
+        callsBookedToday: 0, callsTakenToday: 0, dealsToday: 0, cashToday: 0,
+        callsBookedYesterday: 0, callsTakenYesterday: 0, dealsYesterday: 0, cashYesterday: 0,
+        callsBookedMTD: 0, callsTakenMTD: 0, noShowsMTD: 0, offersMTD: 0, dealsMTD: 0, cashMTD: 0, revMTD: 0,
+      }
+    }
+
+    let todayTotals = { booked: 0, taken: 0, deals: 0, cash: 0 }
+    let yesterdayTotals = { booked: 0, taken: 0, deals: 0, cash: 0 }
+    let mtdTotals = { booked: 0, taken: 0, noShows: 0, offers: 0, deals: 0, cash: 0, rev: 0 }
+
+    for (const r of closerEODs) {
+      const f = r.fields || r.cellValuesByFieldId || {}
+      const name = (f['Your Name']?.name || f['Your Name'] || '').toString()
+      const date = f["Today's Date"] || f['fldvnmr6n167ZxjEL'] || ''
+      const booked = Number(f['Call Slots Filled'] || f['fld5hIrV3MfdyHaxo'] || 0)
+      const taken = Number(f['Calls Taken'] || f['fld4EsJpqqRPUwlRS'] || 0)
+      const noShows = Number(f['No Shows'] || f['fldMR9yyJQ1u097bY'] || 0)
+      const offers = Number(f['Offers Made'] || f['fldgMNBxU5NuARIew'] || 0)
+      const deals = Number(f['Deals Closed'] || f['fldDQ07efjONEcSu5'] || 0)
+      const cash = Number(f['Cash Collected'] || f['fldZfE3C0XTxH2sCj'] || 0)
+      const rev = Number(f['Revenue Generated'] || f['fldpP5y7BBEAib2Zw'] || 0)
+
+      mtdTotals.booked += booked; mtdTotals.taken += taken; mtdTotals.noShows += noShows
+      mtdTotals.offers += offers; mtdTotals.deals += deals; mtdTotals.cash += cash; mtdTotals.rev += rev
+
+      const isToday = date === todayStr
+      const isYesterday = date === yesterdayStr
+
+      if (isToday) {
+        todayTotals.booked += booked; todayTotals.taken += taken
+        todayTotals.deals += deals; todayTotals.cash += cash
+      }
+      if (isYesterday) {
+        yesterdayTotals.booked += booked; yesterdayTotals.taken += taken
+        yesterdayTotals.deals += deals; yesterdayTotals.cash += cash
+      }
+
+      if (name && byCloser[name]) {
+        byCloser[name].callsBookedMTD += booked
+        byCloser[name].callsTakenMTD += taken
+        byCloser[name].noShowsMTD += noShows
+        byCloser[name].offersMTD += offers
+        byCloser[name].dealsMTD += deals
+        byCloser[name].cashMTD += cash
+        byCloser[name].revMTD += rev
+        if (isToday) {
+          byCloser[name].callsBookedToday += booked
+          byCloser[name].callsTakenToday += taken
+          byCloser[name].dealsToday += deals
+          byCloser[name].cashToday += cash
+        }
+        if (isYesterday) {
+          byCloser[name].callsBookedYesterday += booked
+          byCloser[name].callsTakenYesterday += taken
+          byCloser[name].dealsYesterday += deals
+          byCloser[name].cashYesterday += cash
+        }
+      }
+    }
+
+    // Compute rates per closer
+    const closerStats = Object.entries(byCloser).map(([name, d]) => ({
+      name,
+      ...d,
+      showRate: d.callsBookedMTD > 0 ? parseFloat((d.callsTakenMTD / d.callsBookedMTD * 100).toFixed(1)) : 0,
+      closeRate: d.callsTakenMTD > 0 ? parseFloat((d.dealsMTD / d.callsTakenMTD * 100).toFixed(1)) : 0,
+    })).sort((a, b) => b.cashMTD - a.cashMTD)
+
+    // ── Recent deals from NEW Cash ──
+    const recentDeals = newCashRecords.map(r => {
+      const f = r.fields || r.cellValuesByFieldId || {}
+      const closerRaw = f['Closer Name'] || f['fldiXMFl9agUUDFtc']
+      const closer = Array.isArray(closerRaw) ? (closerRaw[0]?.name || closerRaw[0] || '').toString() : (closerRaw?.name || closerRaw || '').toString()
+      return {
+        name: f['Client / Deal Name'] || f['fldJm0LHMAzFNq08H'] || 'Unknown',
+        cash: Number(f['Cash Collected'] || f['fldwBOUnG9olgOJe2'] || 0),
+        revenue: Number(f['Rev Generated'] || f['fld1KJdXQYr2Bm0pp'] || 0),
+        closer,
+        date: f['Date Closed'] || f['fldJYhT8NaF8Zu9Wc'] || '',
+        service: (f['Service']?.name || f['Service'] || '').toString(),
+        type: (f['Sale Type']?.name || f['Sale Type'] || '').toString(),
+      }
+    }).sort((a, b) => (b.date || '').localeCompare(a.date || '')).slice(0, 15)
+
+    // ── GHL Pipeline Breakdown ──
+    const stageBreakdown = {}
+    for (const opp of ghlOpps) {
+      const stage = STAGE_MAP[opp.pipelineStageId] || 'Unknown'
+      stageBreakdown[stage] = (stageBreakdown[stage] || 0) + 1
+    }
+    const pipelineStages = Object.entries(stageBreakdown)
+      .map(([stage, count]) => ({ stage, count }))
+      .sort((a, b) => b.count - a.count)
+
+    // ── Hot prospects (need action) ──
+    const HOT_STAGES = ['Call Booked', 'Closer Follow Up', 'Need Rescheduled', 'Application Submitted']
+    const hotProspects = ghlOpps
+      .filter(o => HOT_STAGES.includes(STAGE_MAP[o.pipelineStageId]))
+      .map(o => ({
+        name: o.name || o.contactName || 'Unknown',
+        stage: STAGE_MAP[o.pipelineStageId] || 'Unknown',
+        value: o.monetaryValue || 0,
+        updatedAt: o.updatedAt || '',
+      }))
+      .sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''))
+      .slice(0, 20)
+
+    const dashboard = {
+      today: todayTotals,
+      yesterday: yesterdayTotals,
+      mtd: {
+        ...mtdTotals,
+        showRate: mtdTotals.booked > 0 ? parseFloat((mtdTotals.taken / mtdTotals.booked * 100).toFixed(1)) : 0,
+        closeRate: mtdTotals.taken > 0 ? parseFloat((mtdTotals.deals / mtdTotals.taken * 100).toFixed(1)) : 0,
+        dollarPerCall: mtdTotals.booked > 0 ? parseFloat((mtdTotals.cash / mtdTotals.booked).toFixed(2)) : 0,
+      },
+      closerStats,
+      recentDeals,
+      pipelineStages,
+      hotProspects,
+      totalOpportunities: ghlOpps.length,
+      lastUpdated: new Date().toLocaleTimeString('en-US', { timeZone: 'America/Chicago' }),
+    }
+
+    const c = readCache()
+    c.salesDashboard = dashboard
+    c.salesDashboardUpdated = new Date().toISOString()
+    writeCache(c)
+
+    res.json(dashboard)
+  } catch (err) {
+    console.error('Sales error:', err.message)
+    res.json(cache.salesDashboard || { error: err.message })
+  }
 })
 
 // Marketing data — live from Hyros
