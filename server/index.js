@@ -1066,8 +1066,7 @@ app.get('/api/finance', async (req, res) => {
     const cache = readCache()
     cache.finance = finance
     cache.financeCachedAt = Date.now()
-    const fs = require('fs')
-    fs.writeFileSync('./server/data.json', JSON.stringify(cache, null, 2))
+    writeCache(cache)
 
     res.json(finance)
   } catch (e) {
