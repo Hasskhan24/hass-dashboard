@@ -1125,11 +1125,15 @@ app.post('/api/finance/refresh', async (req, res) => {
           byCloserMap[closer].amount += cash
         }
       }
+      const today3 = new Date()
+      const dom3 = today3.getDate()
+      const dim3 = new Date(today3.getFullYear(), today3.getMonth() + 1, 0).getDate()
+      const projNew3 = Math.round((cashCollected / dom3) * dim3)
       finance.newCash.collected = cashCollected
       finance.newCash.revenue = revGenerated
       finance.newCash.deals = newCashRecords.length
       finance.newCash.totalCollected = finance.mrr.collected + cashCollected
-      finance.newCash.forecastedTotal = finance.mrr.expected + cashCollected
+      finance.newCash.forecastedTotal = finance.mrr.expected + projNew3
       finance.pl.projectedRevenue = finance.newCash.forecastedTotal
       finance.byCloser = Object.entries(byCloserMap)
         .map(([name, d]) => ({ name, deals: d.deals, amount: d.amount }))
