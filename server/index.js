@@ -610,32 +610,39 @@ function buildFinanceFromAirtable(closerEODs = null, recurringCash = null) {
   }
 
   // ── RECURRING Cash (MRR) ──
+  // Tries April columns first, falls back to most recent actual (March/Feb)
   const recurring = recurringCash || []
   let mrrExpected = 0, mrrCollected = 0
   for (const r of recurring) {
     const f = r.fields || r.cellValuesByFieldId || {}
-    mrrExpected += Number(f['April 26'] || f['fldRio9Bf3jlli88H'] || 0)
-    mrrCollected += Number(f['April Act 26'] || f['fldbl8WLY3qkdwBMx'] || 0)
+    // April columns first, then fall back to March projected, then Feb actual
+    const expected = Number(f['April 26'] || f['March 26'] || f['Feb 26 Act'] || 0)
+    const collected = Number(f['April Act 26'] || 0)
+    mrrExpected += expected
+    mrrCollected += collected
   }
 
-  // Fall back to CF Reporting actuals if Airtable not connected
+  // Fall back to live Airtable pull if EODs not fetched
   if (!eods.length) {
-    totalCallsTaken = 28; totalNoShows = 17; totalOffers = 26; totalDeals = 7
-    totalCash = 82136; totalRev = 107135; totalCallSlots = 63
-    byCloserMap['Hass'] = { deals: 2, amount: 31550 }
-    byCloserMap['Lily'] = { deals: 1, amount: 18000 }
-    byCloserMap['Eric'] = { deals: 2, amount: 5001 }
-    byCloserMap['Akash'] = { deals: 2, amount: 27585 }
+    // Keep totalCash/totalRev as 0 — will show blank rather than wrong hardcoded data
   }
   if (!recurring.length) {
-    mrrExpected = 166925; mrrCollected = 47400
+    // No recurring data — use last known baseline from March
+    mrrExpected = 129225; mrrCollected = 0
   }
 
   const mrrRemaining = mrrExpected - mrrCollected
   const showRate = totalCallSlots > 0 ? (totalCallsTaken / totalCallSlots) * 100 : 0
   const closeRate = totalCallsTaken > 0 ? (totalDeals / totalCallsTaken) * 100 : 0
   const dollarPerBookedCall = totalCallSlots > 0 ? totalCash / totalCallSlots : 0
-  const forecastedTotal = mrrExpected + totalCash
+
+  // Forecasted = MRR (full month) + new cash projected at current daily pace
+  const today = new Date()
+  const dayOfMonth = today.getDate()
+  const daysInMonth = new Date(today.getFullYear(), today.getMonth() + 1, 0).getDate()
+  const dailyNewCashPace = dayOfMonth > 0 ? totalCash / dayOfMonth : 0
+  const projectedNewCash = Math.round(dailyNewCashPace * daysInMonth)
+  const forecastedTotal = mrrExpected + projectedNewCash
   const totalCollected = mrrCollected + totalCash
 
   return {
@@ -1008,15 +1015,66 @@ app.get('/api/payroll', (req, res) => {
   res.json(MARCH_PAYROLL)
 })
 
-// Finance data
-app.get('/api/finance', (req, res) => {
-  const cache = readCache()
-  if (cache.finance) return res.json(cache.finance)
+// Finance data — always redirects to refresh for live data
+app.get('/api/finance', async (req, res) => {
+  try {
+    // Always pull live from Airtable so numbers are never stale
+    const today = new Date()
+    const dayBeforeMonthStart = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-01`
+    const prevDay = new Date(dayBeforeMonthStart)
+    prevDay.setDate(prevDay.getDate() - 1)
+    const filterDate = `${prevDay.getFullYear()}-${String(prevDay.getMonth()+1).padStart(2,'0')}-${String(prevDay.getDate()).padStart(2,'0')}`
 
-  // Live numbers from Airtable CF Business Hub (Closer EODs + RECURRING Cash)
-  // Last synced from Airtable MCP — use /api/finance/refresh to pull latest
-  const financeData = buildFinanceFromAirtable()
-  res.json(financeData)
+    const [closerEODs, recurringCash, newCashRecords] = await Promise.all([
+      fetchAirtableRecords('tblrF6wHdRLHXQ4EN',
+        ['Your Name','Calls Taken','No Shows','Offers Made','Deals Closed','Cash Collected','Revenue Generated','Call Slots Filled'],
+        `IS_AFTER({Today's Date}, '${filterDate}')`
+      ),
+      fetchAirtableRecords('tblIIV3rVGhhV0vsf',
+        ['Client','Client Status','April 26','April Act 26','March 26','Feb 26 Act'],
+        `{Client Status}='Active - MRR'`
+      ),
+      fetchAirtableRecords('tblQDgLyWasv8T7Qz',
+        ['Client / Deal Name','Cash Collected','Rev Generated','Closer Name','Date Closed','Service','Sale Type'],
+        `IS_AFTER({Date Closed}, '${filterDate}')`
+      ),
+    ])
+
+    const finance = buildFinanceFromAirtable(
+      closerEODs.length ? closerEODs : null,
+      recurringCash.length ? recurringCash : null
+    )
+
+    if (newCashRecords.length) {
+      let cashCollected = 0, revGenerated = 0
+      for (const r of newCashRecords) {
+        const f = r.fields || {}
+        cashCollected += Number(f['Cash Collected'] || 0)
+        revGenerated += Number(f['Rev Generated'] || f['Revenue Generated'] || 0)
+      }
+      const today2 = new Date()
+      const dom = today2.getDate()
+      const dim = new Date(today2.getFullYear(), today2.getMonth() + 1, 0).getDate()
+      const projNew = Math.round((cashCollected / dom) * dim)
+      finance.newCash.collected = cashCollected
+      finance.newCash.revenue = revGenerated
+      finance.newCash.forecastedTotal = finance.mrr.expected + projNew
+      finance.pl.projectedRevenue = finance.newCash.forecastedTotal
+    }
+
+    // Cache for 30 min to avoid hammering Airtable
+    const cache = readCache()
+    cache.finance = finance
+    cache.financeCachedAt = Date.now()
+    const fs = require('fs')
+    fs.writeFileSync('./server/data.json', JSON.stringify(cache, null, 2))
+
+    res.json(finance)
+  } catch (e) {
+    console.error('Finance live fetch failed:', e.message)
+    const cache = readCache()
+    res.json(cache.finance || buildFinanceFromAirtable())
+  }
 })
 
 app.post('/api/finance/refresh', async (req, res) => {
