@@ -1154,9 +1154,9 @@ app.post('/api/finance/refresh', async (req, res) => {
 // Sales data - comprehensive dashboard
 app.get('/api/sales', async (req, res) => {
   const cache = readCache()
-  // Return cached if < 30 min old
+  // Return cached if < 5 min old (shorter so updates flow through)
   if (cache.salesDashboard && cache.salesDashboardUpdated &&
-      (Date.now() - new Date(cache.salesDashboardUpdated).getTime()) < 1800000) {
+      (Date.now() - new Date(cache.salesDashboardUpdated).getTime()) < 300000) {
     return res.json(cache.salesDashboard)
   }
 
