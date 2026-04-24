@@ -1161,15 +1161,16 @@ app.get('/api/sales', async (req, res) => {
   }
 
   try {
-    const today = new Date()
-    const yesterday = new Date(today)
-    yesterday.setDate(yesterday.getDate() - 1)
-    const todayStr = today.toISOString().slice(0, 10)
-    const yesterdayStr = yesterday.toISOString().slice(0, 10)
-    const monthStart = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-01`
-    const prevDay = new Date(monthStart)
+    // Use America/Chicago timezone so "today/yesterday" matches the business day
+    const ctNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }))
+    const ctYesterday = new Date(ctNow)
+    ctYesterday.setDate(ctYesterday.getDate() - 1)
+    const todayStr = `${ctNow.getFullYear()}-${String(ctNow.getMonth() + 1).padStart(2, '0')}-${String(ctNow.getDate()).padStart(2, '0')}`
+    const yesterdayStr = `${ctYesterday.getFullYear()}-${String(ctYesterday.getMonth() + 1).padStart(2, '0')}-${String(ctYesterday.getDate()).padStart(2, '0')}`
+    const monthStart = `${ctNow.getFullYear()}-${String(ctNow.getMonth() + 1).padStart(2, '0')}-01`
+    const prevDay = new Date(monthStart + 'T12:00:00')
     prevDay.setDate(prevDay.getDate() - 1)
-    const filterDate = prevDay.toISOString().slice(0, 10)
+    const filterDate = `${prevDay.getFullYear()}-${String(prevDay.getMonth() + 1).padStart(2, '0')}-${String(prevDay.getDate()).padStart(2, '0')}`
 
     // Pull everything in parallel
     const [closerEODs, newCashRecords, ghlOpps] = await Promise.all([
