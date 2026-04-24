@@ -1162,15 +1162,17 @@ app.get('/api/sales', async (req, res) => {
 
   try {
     // Use America/Chicago timezone so "today/yesterday" matches the business day
-    const ctNow = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }))
-    const ctYesterday = new Date(ctNow)
-    ctYesterday.setDate(ctYesterday.getDate() - 1)
-    const todayStr = `${ctNow.getFullYear()}-${String(ctNow.getMonth() + 1).padStart(2, '0')}-${String(ctNow.getDate()).padStart(2, '0')}`
-    const yesterdayStr = `${ctYesterday.getFullYear()}-${String(ctYesterday.getMonth() + 1).padStart(2, '0')}-${String(ctYesterday.getDate()).padStart(2, '0')}`
-    const monthStart = `${ctNow.getFullYear()}-${String(ctNow.getMonth() + 1).padStart(2, '0')}-01`
-    const prevDay = new Date(monthStart + 'T12:00:00')
-    prevDay.setDate(prevDay.getDate() - 1)
-    const filterDate = `${prevDay.getFullYear()}-${String(prevDay.getMonth() + 1).padStart(2, '0')}-${String(prevDay.getDate()).padStart(2, '0')}`
+    // en-CA returns ISO format "YYYY-MM-DD" which matches Airtable's date format
+    const todayStr = new Date().toLocaleDateString('en-CA', { timeZone: 'America/Chicago' })
+    const yesterdayDate = new Date()
+    yesterdayDate.setUTCDate(yesterdayDate.getUTCDate() - 1)
+    const yesterdayStr = yesterdayDate.toLocaleDateString('en-CA', { timeZone: 'America/Chicago' })
+    // Month start and filter date (day before month start so IS_AFTER includes the 1st)
+    const [yr, mo] = todayStr.split('-')
+    const monthStart = `${yr}-${mo}-01`
+    const prevDayDate = new Date(`${monthStart}T12:00:00Z`)
+    prevDayDate.setUTCDate(prevDayDate.getUTCDate() - 1)
+    const filterDate = prevDayDate.toISOString().slice(0, 10)
 
     // Pull everything in parallel
     const [closerEODs, newCashRecords, ghlOpps] = await Promise.all([
