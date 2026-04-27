@@ -709,6 +709,35 @@ function buildFinanceFromAirtable(closerEODs = null, recurringCash = null) {
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }))
 
+// Version/diagnostic endpoint
+app.get('/api/version', async (req, res) => {
+  let payrollDir = null
+  let payrollFiles = []
+  let payrollLoadResult = null
+  try {
+    const { default: fsm } = await import('fs')
+    const { fileURLToPath } = await import('url')
+    const { dirname, join } = await import('path')
+    const here = dirname(fileURLToPath(import.meta.url))
+    payrollDir = join(here, 'payroll')
+    if (fsm.existsSync(payrollDir)) {
+      payrollFiles = fsm.readdirSync(payrollDir)
+    }
+    const data = await loadLatestPayroll()
+    payrollLoadResult = data ? { sourceFile: data.sourceFile, total: data.totalPayroll } : 'null'
+  } catch (e) {
+    payrollLoadResult = `ERROR: ${e.message}`
+  }
+  res.json({
+    deployedAt: new Date().toISOString(),
+    cwd: process.cwd(),
+    payrollDir,
+    payrollFiles,
+    payrollLoadResult,
+    nodeVersion: process.version,
+  })
+})
+
 // ─── QuickBooks OAuth Routes ────────────────────────────────────────────────
 // Step 1: Start OAuth flow — user visits this URL
 app.get('/api/qb/connect', (req, res) => {
