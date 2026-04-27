@@ -8,6 +8,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import cron from 'node-cron'
 import { MARCH_PAYROLL } from './payroll-march.js'
+import { loadLatestPayroll } from './payroll-loader.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const envPath = path.join(__dirname, '../.env')
@@ -1023,9 +1024,11 @@ Be concise, direct, and action-oriented. Use numbers and specifics when availabl
   }
 })
 
-// Payroll data — from March 2026 payroll PDF (source of truth)
-app.get('/api/payroll', (req, res) => {
-  res.json(MARCH_PAYROLL)
+// Payroll data — auto-loaded from /server/payroll/YYYY-MM.js (most recent month)
+// Drop a new month's payroll JSON in /server/payroll/ and it picks up automatically
+app.get('/api/payroll', async (req, res) => {
+  const data = await loadLatestPayroll()
+  res.json(data || MARCH_PAYROLL)
 })
 
 // Finance data — always redirects to refresh for live data
