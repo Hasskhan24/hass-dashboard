@@ -19,11 +19,19 @@ export async function loadLatestPayroll() {
   }
 
   try {
-    const files = fs.readdirSync(PAYROLL_DIR).filter(f => /^\d{4}-\d{2}\.js$/.test(f)).sort()
-    if (!files.length) {
-      console.warn('No payroll files found in', PAYROLL_DIR)
+    console.log('[payroll-loader] reading directory:', PAYROLL_DIR)
+    if (!fs.existsSync(PAYROLL_DIR)) {
+      console.warn('[payroll-loader] directory does not exist:', PAYROLL_DIR)
       return null
     }
+    const allFiles = fs.readdirSync(PAYROLL_DIR)
+    console.log('[payroll-loader] files in dir:', allFiles)
+    const files = allFiles.filter(f => /^\d{4}-\d{2}\.js$/.test(f)).sort()
+    if (!files.length) {
+      console.warn('[payroll-loader] no YYYY-MM.js files found')
+      return null
+    }
+    console.log('[payroll-loader] eligible files:', files)
 
     // Pick the most recent month that's <= current month, fall back to latest
     const todayCT = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }))
