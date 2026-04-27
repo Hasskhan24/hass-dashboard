@@ -610,14 +610,27 @@ function buildFinanceFromAirtable(closerEODs = null, recurringCash = null) {
   }
 
   // ── RECURRING Cash (MRR) ──
-  // Tries April columns first, falls back to most recent actual (March/Feb)
+  // Auto-detects current month — works for any month without code changes
   const recurring = recurringCash || []
   let mrrExpected = 0, mrrCollected = 0
+  const todayCT = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }))
+  const monthFull = todayCT.toLocaleString('en-US', { month: 'long' })   // "April"
+  const monthShort = todayCT.toLocaleString('en-US', { month: 'short' }) // "Apr"
+  const yr2 = String(todayCT.getFullYear()).slice(-2)                    // "26"
+  // Field naming patterns Airtable uses across months:
+  //   "April 26"         (full name + 2-digit year)
+  //   "Apr 26"           (short name + 2-digit year)
+  //   "Apr 26 Proj"      (sometimes with Proj/Projected suffix)
+  //   "April Act 26"     (actual collected)
+  //   "Apr Act 26"
+  //   "Apr 26 Act"
+  const expectedKeys = [`${monthFull} ${yr2}`, `${monthShort} ${yr2}`, `${monthShort} ${yr2} Proj`, `${monthShort} ${yr2} Projected`, `${monthFull} ${yr2} Proj`]
+  const collectedKeys = [`${monthFull} Act ${yr2}`, `${monthShort} Act ${yr2}`, `${monthFull} ${yr2} Act`, `${monthShort} ${yr2} Act`, `${monthShort} ${yr2} Actual`]
   for (const r of recurring) {
     const f = r.fields || r.cellValuesByFieldId || {}
-    // April columns first, then fall back to March projected, then Feb actual
-    const expected = Number(f['April 26'] || f['March 26'] || f['Feb 26 Act'] || 0)
-    const collected = Number(f['April Act 26'] || 0)
+    let expected = 0, collected = 0
+    for (const k of expectedKeys) { if (f[k] != null) { expected = Number(f[k] || 0); break } }
+    for (const k of collectedKeys) { if (f[k] != null) { collected = Number(f[k] || 0); break } }
     mrrExpected += expected
     mrrCollected += collected
   }
@@ -1025,13 +1038,26 @@ app.get('/api/finance', async (req, res) => {
     prevDay.setDate(prevDay.getDate() - 1)
     const filterDate = `${prevDay.getFullYear()}-${String(prevDay.getMonth()+1).padStart(2,'0')}-${String(prevDay.getDate()).padStart(2,'0')}`
 
+    // Auto-detect current month for MRR field names (e.g. "April 26" → "May 26" → "June 26")
+    const todayCT = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }))
+    const mFull = todayCT.toLocaleString('en-US', { month: 'long' })
+    const mShort = todayCT.toLocaleString('en-US', { month: 'short' })
+    const yr2 = String(todayCT.getFullYear()).slice(-2)
+    // Pull a wide set of field name candidates Airtable might use
+    const recurringFields = ['Client','Client Status',
+      `${mFull} ${yr2}`, `${mShort} ${yr2}`,
+      `${mFull} Act ${yr2}`, `${mShort} Act ${yr2}`,
+      `${mShort} ${yr2} Act`, `${mShort} ${yr2} Actual`,
+      `${mShort} ${yr2} Proj`, `${mShort} ${yr2} Projected`,
+    ]
+
     const [closerEODs, recurringCash, newCashRecords] = await Promise.all([
       fetchAirtableRecords('tblrF6wHdRLHXQ4EN',
         ['Your Name','Calls Taken','No Shows','Offers Made','Deals Closed','Cash Collected','Revenue Generated','Call Slots Filled'],
         `IS_AFTER({Today's Date}, '${filterDate}')`
       ),
       fetchAirtableRecords('tblIIV3rVGhhV0vsf',
-        ['Client','Client Status','April 26','April Act 26','March 26','Feb 26 Act'],
+        recurringFields,
         `{Client Status}='Active - MRR'`
       ),
       fetchAirtableRecords('tblQDgLyWasv8T7Qz',
@@ -1086,13 +1112,25 @@ app.post('/api/finance/refresh', async (req, res) => {
     prevDay.setDate(prevDay.getDate() - 1)
     const filterDate = `${prevDay.getFullYear()}-${String(prevDay.getMonth()+1).padStart(2,'0')}-${String(prevDay.getDate()).padStart(2,'0')}`
 
+    // Auto-detect current month field names
+    const todayCT2 = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }))
+    const mF = todayCT2.toLocaleString('en-US', { month: 'long' })
+    const mS = todayCT2.toLocaleString('en-US', { month: 'short' })
+    const y2 = String(todayCT2.getFullYear()).slice(-2)
+    const rFields = ['Client','Client Status',
+      `${mF} ${y2}`, `${mS} ${y2}`,
+      `${mF} Act ${y2}`, `${mS} Act ${y2}`,
+      `${mS} ${y2} Act`, `${mS} ${y2} Actual`,
+      `${mS} ${y2} Proj`, `${mS} ${y2} Projected`,
+    ]
+
     const [closerEODs, recurringCash, newCashRecords] = await Promise.all([
       fetchAirtableRecords('tblrF6wHdRLHXQ4EN',
         ['Your Name','Calls Taken','No Shows','Offers Made','Deals Closed','Cash Collected','Revenue Generated','Call Slots Filled'],
         `IS_AFTER({Today's Date}, '${filterDate}')`
       ),
       fetchAirtableRecords('tblIIV3rVGhhV0vsf',
-        ['Client','Client Status','April 26','April Act 26'],
+        rFields,
         `{Client Status}='Active - MRR'`
       ),
       fetchAirtableRecords('tblQDgLyWasv8T7Qz',
