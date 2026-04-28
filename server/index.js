@@ -625,7 +625,8 @@ function buildFinanceFromAirtable(closerEODs = null, recurringCash = null) {
   //   "April Act 26"     (actual collected)
   //   "Apr Act 26"
   //   "Apr 26 Act"
-  const expectedKeys = [`${monthFull} ${yr2}`, `${monthShort} ${yr2}`, `${monthShort} ${yr2} Proj`, `${monthShort} ${yr2} Projected`, `${monthFull} ${yr2} Proj`]
+  // Only use the actual current-month columns (no projected fallbacks that inflate numbers)
+  const expectedKeys = [`${monthFull} ${yr2}`, `${monthShort} ${yr2}`]
   const collectedKeys = [`${monthFull} Act ${yr2}`, `${monthShort} Act ${yr2}`, `${monthFull} ${yr2} Act`, `${monthShort} ${yr2} Act`, `${monthShort} ${yr2} Actual`]
   for (const r of recurring) {
     const f = r.fields || r.cellValuesByFieldId || {}
@@ -1080,7 +1081,6 @@ app.get('/api/finance', async (req, res) => {
       `${mFull} ${yr2}`, `${mShort} ${yr2}`,
       `${mFull} Act ${yr2}`, `${mShort} Act ${yr2}`,
       `${mShort} ${yr2} Act`, `${mShort} ${yr2} Actual`,
-      `${mShort} ${yr2} Proj`, `${mShort} ${yr2} Projected`,
     ]
 
     const [closerEODs, recurringCash, newCashRecords] = await Promise.all([
@@ -1153,7 +1153,6 @@ app.post('/api/finance/refresh', async (req, res) => {
       `${mF} ${y2}`, `${mS} ${y2}`,
       `${mF} Act ${y2}`, `${mS} Act ${y2}`,
       `${mS} ${y2} Act`, `${mS} ${y2} Actual`,
-      `${mS} ${y2} Proj`, `${mS} ${y2} Projected`,
     ]
 
     const [closerEODs, recurringCash, newCashRecords] = await Promise.all([
