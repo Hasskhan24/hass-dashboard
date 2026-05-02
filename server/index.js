@@ -1061,66 +1061,134 @@ app.get('/api/payroll', async (req, res) => {
   res.json(data || MARCH_PAYROLL)
 })
 
-// Finance data — always redirects to refresh for live data
+// Finance data — pulls from Payments table (source of truth, matches CF Reporting)
 app.get('/api/finance', async (req, res) => {
   try {
-    // Always pull live from Airtable so numbers are never stale
-    const today = new Date()
-    const dayBeforeMonthStart = `${today.getFullYear()}-${String(today.getMonth()+1).padStart(2,'0')}-01`
-    const prevDay = new Date(dayBeforeMonthStart)
-    prevDay.setDate(prevDay.getDate() - 1)
-    const filterDate = `${prevDay.getFullYear()}-${String(prevDay.getMonth()+1).padStart(2,'0')}-${String(prevDay.getDate()).padStart(2,'0')}`
-
-    // Auto-detect current month for MRR field names (e.g. "April 26" → "May 26" → "June 26")
+    // Use America/Chicago timezone for the business day boundary
     const todayCT = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/Chicago' }))
     const mFull = todayCT.toLocaleString('en-US', { month: 'long' })
     const mShort = todayCT.toLocaleString('en-US', { month: 'short' })
     const yr2 = String(todayCT.getFullYear()).slice(-2)
-    // Pull a wide set of field name candidates Airtable might use
-    const recurringFields = ['Client','Client Status',
-      `${mFull} ${yr2}`, `${mShort} ${yr2}`,
-      `${mFull} Act ${yr2}`, `${mShort} Act ${yr2}`,
-      `${mShort} ${yr2} Act`, `${mShort} ${yr2} Actual`,
-    ]
 
-    const [closerEODs, recurringCash, newCashRecords] = await Promise.all([
+    // Filter date for Payments — IS_AFTER day-before-month-start to include the 1st
+    const monthStart = `${todayCT.getFullYear()}-${String(todayCT.getMonth()+1).padStart(2,'0')}-01`
+    const prevDay = new Date(`${monthStart}T12:00:00Z`)
+    prevDay.setUTCDate(prevDay.getUTCDate() - 1)
+    const filterDate = prevDay.toISOString().slice(0, 10)
+
+    // Pull payments + recurring (for MRR Expected) in parallel
+    const [payments, recurringCash, closerEODs] = await Promise.all([
+      fetchAirtableRecords('tbl5MagNwdt1NzDIK',
+        ['Client','Amount','Paid','Payment Date','Type','Status','Closer'],
+        `IS_AFTER({Payment Date}, '${filterDate}')`
+      ),
+      fetchAirtableRecords('tblIIV3rVGhhV0vsf',
+        ['Client','Client Status', `${mFull} ${yr2}`, `${mShort} ${yr2}`],
+        `{Client Status}='Active - MRR'`
+      ),
       fetchAirtableRecords('tblrF6wHdRLHXQ4EN',
         ['Your Name','Calls Taken','No Shows','Offers Made','Deals Closed','Cash Collected','Revenue Generated','Call Slots Filled'],
         `IS_AFTER({Today's Date}, '${filterDate}')`
       ),
-      fetchAirtableRecords('tblIIV3rVGhhV0vsf',
-        recurringFields,
-        `{Client Status}='Active - MRR'`
-      ),
-      fetchAirtableRecords('tblQDgLyWasv8T7Qz',
-        ['Client / Deal Name','Cash Collected','Rev Generated','Closer Name','Date Closed','Service','Sale Type'],
-        `IS_AFTER({Date Closed}, '${filterDate}')`
-      ),
     ])
 
-    const finance = buildFinanceFromAirtable(
-      closerEODs.length ? closerEODs : null,
-      recurringCash.length ? recurringCash : null
-    )
-
-    if (newCashRecords.length) {
-      let cashCollected = 0, revGenerated = 0
-      for (const r of newCashRecords) {
-        const f = r.fields || {}
-        cashCollected += Number(f['Cash Collected'] || 0)
-        revGenerated += Number(f['Rev Generated'] || f['Revenue Generated'] || 0)
-      }
-      const today2 = new Date()
-      const dom = today2.getDate()
-      const dim = new Date(today2.getFullYear(), today2.getMonth() + 1, 0).getDate()
-      const projNew = Math.round((cashCollected / dom) * dim)
-      finance.newCash.collected = cashCollected
-      finance.newCash.revenue = revGenerated
-      finance.newCash.forecastedTotal = finance.mrr.expected + projNew
-      finance.pl.projectedRevenue = finance.newCash.forecastedTotal
+    // Sum MRR Expected from RECURRING Cash table (full month projection)
+    let mrrExpected = 0
+    for (const r of recurringCash) {
+      const f = r.fields || {}
+      const v = f[`${mFull} ${yr2}`] != null ? f[`${mFull} ${yr2}`] : f[`${mShort} ${yr2}`]
+      if (v != null) mrrExpected += Number(v || 0)
     }
 
-    // Cache for 30 min to avoid hammering Airtable
+    // Sum Payments by type (from Payments table — single source of truth)
+    let mrrCollected = 0, newCash = 0, upsellCash = 0
+    const byCloserMap = {}
+    let totalDeals = 0
+    for (const r of payments) {
+      const f = r.fields || {}
+      const amount = Number(f['Amount'] || 0)
+      const typeRaw = f['Type']
+      const type = typeof typeRaw === 'object' ? typeRaw?.name : (typeRaw || '')
+      const closerRaw = f['Closer']
+      const closer = typeof closerRaw === 'object' ? closerRaw?.name : (closerRaw || '')
+
+      if (type === 'MRR') mrrCollected += amount
+      else if (type === 'New') { newCash += amount; totalDeals += 1 }
+      else if (type === 'Upsell') upsellCash += amount
+
+      if (closer && (type === 'New' || type === 'Upsell')) {
+        if (!byCloserMap[closer]) byCloserMap[closer] = { deals: 0, amount: 0 }
+        byCloserMap[closer].deals += 1
+        byCloserMap[closer].amount += amount
+      }
+    }
+
+    // Closer EODs for sales activity (calls, no-shows, etc.)
+    let totalCallSlots = 0, totalCallsTaken = 0, totalNoShows = 0, totalOffers = 0
+    for (const r of closerEODs) {
+      const f = r.fields || {}
+      totalCallSlots += Number(f['Call Slots Filled'] || 0)
+      totalCallsTaken += Number(f['Calls Taken'] || 0)
+      totalNoShows += Number(f['No Shows'] || 0)
+      totalOffers += Number(f['Offers Made'] || 0)
+    }
+
+    const showRate = totalCallSlots > 0 ? (totalCallsTaken / totalCallSlots) * 100 : 0
+    const closeRate = totalCallsTaken > 0 ? (totalDeals / totalCallsTaken) * 100 : 0
+
+    // Forecasted = MRR Expected (full month) + new cash + upsell projected at current pace
+    const dayOfMonth = todayCT.getDate()
+    const daysInMonth = new Date(todayCT.getFullYear(), todayCT.getMonth() + 1, 0).getDate()
+    const totalCashCollected = newCash + upsellCash
+    const projectedExtra = Math.round((totalCashCollected / dayOfMonth) * daysInMonth)
+    const totalRevenue = mrrCollected + newCash + upsellCash
+    const forecastedTotal = mrrExpected + projectedExtra
+
+    const finance = {
+      mrr: {
+        expected: mrrExpected,
+        collected: mrrCollected,
+        remaining: Math.max(0, mrrExpected - mrrCollected),
+        clients: recurringCash.length,
+      },
+      upsell: { collected: upsellCash, target: 10000 },
+      newCash: {
+        collected: newCash,
+        revenue: newCash,
+        deals: totalDeals,
+        forecastedTotal,
+        totalCollected: totalRevenue,
+      },
+      sales: {
+        callsBooked: totalCallSlots,
+        callsTaken: totalCallsTaken,
+        noShows: totalNoShows,
+        showRate: parseFloat(showRate.toFixed(1)),
+        offersMade: totalOffers,
+        dealsClosed: totalDeals,
+        closeRate: parseFloat(closeRate.toFixed(1)),
+        cashCollected: totalRevenue,
+        revGenerated: totalRevenue,
+        dollarPerBookedCall: totalCallSlots > 0 ? parseFloat((totalRevenue / totalCallSlots).toFixed(2)) : 0,
+      },
+      byCloser: Object.entries(byCloserMap)
+        .map(([name, d]) => ({ name, deals: d.deals, amount: d.amount }))
+        .sort((a, b) => b.amount - a.amount),
+      pl: {
+        projectedRevenue: forecastedTotal,
+        ownersDraw: 35000,
+        adSpend: 54000,
+        fixedOverhead: {
+          softwareApps: 12863, rentBuilding: 12000, officeUtilities: 1695,
+          legalAccounting: 2119, bankMerchantFees: 7469, insurance: 750,
+          memberships: 1500, officeExpenses: 655, adminLabor: 859,
+          travel: 1632, meals: 320, interest: 998, vehicle: 28,
+        },
+        marchCOGS: 81454,
+      },
+      lastUpdated: `Live from Payments table · ${new Date().toLocaleTimeString('en-US', { timeZone: 'America/Chicago' })}`,
+    }
+
     const cache = readCache()
     cache.finance = finance
     cache.financeCachedAt = Date.now()
